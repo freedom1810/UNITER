@@ -19,6 +19,7 @@ from data.data import open_lmdb
 @curry
 def bert_tokenize(tokenizer, text):
     ids = []
+    print(text)
     for word in text.strip().split():
         ws = tokenizer.tokenize(word)
         if not ws:
@@ -48,6 +49,7 @@ def process_nlvr2(jsonl, db, tokenizer, missing=None):
         example['input_ids'] = input_ids
         example['img_fname'] = img_fname
         example['target'] = target
+        # print(example['target'])
         db[id_] = example
     return id2len, txt2img
 
@@ -62,6 +64,7 @@ def main(opts):
     meta['tokenizer'] = opts.toker
     toker = BertTokenizer.from_pretrained(
         opts.toker, do_lower_case='uncased' in opts.toker)
+        
     tokenizer = bert_tokenize(toker)
     meta['UNK'] = toker.convert_tokens_to_ids(['[UNK]'])[0]
     meta['CLS'] = toker.convert_tokens_to_ids(['[CLS]'])[0]
@@ -91,10 +94,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--annotation', required=True,
                         help='annotation JSON')
+
     parser.add_argument('--missing_imgs',
                         help='some training image features are corrupted')
+
     parser.add_argument('--output', required=True,
                         help='output dir of DB')
+
     parser.add_argument('--toker', default='bert-base-cased',
                         help='which BERT tokenizer to used')
     args = parser.parse_args()

@@ -36,4 +36,3 @@ done
 if [ ! -f $DOWNLOAD/pretrained/uniter-base.pt ] ; then
     wget $BLOB/pretrained/uniter-base.pt -P $DOWNLOAD/pretrained/
 fi
-

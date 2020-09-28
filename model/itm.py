@@ -52,7 +52,7 @@ class UniterForImageTextRetrieval(UniterPreTrainedModel):
             rank_loss = torch.clamp(self.margin + neg - pos, 0)
             return rank_loss
         else:
-            return rank_scores
+            return rank_scores, pooled_output
 
 
 class UniterForImageTextRetrievalHardNeg(UniterForImageTextRetrieval):

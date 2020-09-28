@@ -28,6 +28,12 @@ from utils.const import IMG_DIM
 from utils.itm_eval import inference, itm_eval
 
 
+from pytorch_pretrained_bert import BertTokenizer
+import torch
+from horovod import torch as hvd
+from tqdm import tqdm
+import numpy as np
+
 def main(opts):
     hvd.init()
     n_gpu = hvd.size()
@@ -45,72 +51,95 @@ def main(opts):
         opts.max_bb = train_opts.max_bb
         opts.min_bb = train_opts.min_bb
         opts.num_bb = train_opts.num_bb
-
-    # load DBs and image dirs
-    eval_img_db = DetectFeatLmdb(opts.img_db,
-                                 opts.conf_th, opts.max_bb,
-                                 opts.min_bb, opts.num_bb,
-                                 opts.compressed_db)
-    eval_txt_db = TxtTokLmdb(opts.txt_db, -1)
-    eval_dataset = ItmEvalDataset(eval_txt_db, eval_img_db, opts.batch_size)
-
     # Prepare model
     checkpoint = torch.load(opts.checkpoint)
     model = UniterForImageTextRetrieval.from_pretrained(
         opts.model_config, checkpoint, img_dim=IMG_DIM)
     if 'rank_output' not in checkpoint:
         model.init_output()  # zero shot setting
+    # load DBs and image dirs
+    # npz_path = os.listdir('/root/output_meme_butd')
+    # npz_path = ['/root/output_meme_butd/' + i for i in npz_path]
+    json_files =open("/root/meme/train.json", "r")
+    json_files = json_files.read().split('\n')
+    json_files = [json.loads(i) for i in json_files]
 
-    model.to(device)
-    model = amp.initialize(model, enabled=opts.fp16, opt_level='O2')
+    LOGGER.info('load {} file '.format(len(json_files)))
 
-    eval_dataloader = DataLoader(eval_dataset, batch_size=1,
-                                 num_workers=opts.n_workers,
-                                 pin_memory=opts.pin_mem,
-                                 collate_fn=itm_eval_collate)
-    eval_dataloader = PrefetchLoader(eval_dataloader)
-
-    eval_log, results = evaluate(model, eval_dataloader)
-    # if hvd.rank() == 0:
-    #     if not exists(opts.output_dir) and rank == 0:
-    #         os.makedirs(opts.output_dir)
-    #     with open(f'{opts.output_dir}/config.json', 'w') as f:
-    #         json.dump(vars(opts), f)
-    #     with open(f'{opts.output_dir}/results.bin', 'wb') as f:
-    #         pickle.dump(results, f)
-    #     with open(f'{opts.output_dir}/scores.json', 'w') as f:
-    #         json.dump(eval_log, f)
-    #     LOGGER.info(f'evaluation finished')
-    #     LOGGER.info(
-    #         f"======================== Results =========================\n"
-    #         f"image retrieval R1: {eval_log['img_r1']*100:.2f},\n"
-    #         f"image retrieval R5: {eval_log['img_r5']*100:.2f},\n"
-    #         f"image retrieval R10: {eval_log['img_r10']*100:.2f}\n"
-    #         f"text retrieval R1: {eval_log['txt_r1']*100:.2f},\n"
-    #         f"text retrieval R5: {eval_log['txt_r5']*100:.2f},\n"
-    #         f"text retrieval R10: {eval_log['txt_r10']*100:.2f}")
-    #     LOGGER.info("========================================================")
-
+    eval_log, results = evaluate(model, json_files)
 
 @torch.no_grad()
-def evaluate(model, eval_loader):
+def evaluate(model, json_files):
+
+    
+
+    def bert_tokenize(tokenizer, text):
+        ids = []
+        for word in text.strip().split():
+            ws = tokenizer.tokenize(word)
+            if not ws:
+                # some special char
+                continue
+            ids.extend(tokenizer.convert_tokens_to_ids(ws))
+        return ids
+
+    tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
+
     model.eval()
     st = time()
     LOGGER.info("start running Image/Text Retrieval evaluation ...")
-    score_matrix = inference(model, eval_loader)
-    dset = eval_loader.dataset
-    all_score = hvd.allgather(score_matrix)
-    all_txt_ids = [i for ids in all_gather_list(dset.ids)
-                   for i in ids]
-    all_img_ids = dset.all_img_ids
-    assert all_score.size() == (len(all_txt_ids), len(all_img_ids))
-    if hvd.rank() != 0:
-        return {}, tuple()
-    # NOTE: only use rank0 to compute final scores
-    eval_log = itm_eval(all_score, all_txt_ids, all_img_ids,
-                        dset.txt2img, dset.img2txts)
+    # score_matrix = inference(model, eval_loader)
+    model.eval()
 
-    results = (all_score, all_txt_ids, all_img_ids)
+    if hvd.rank() == 0:
+        pbar = tqdm(total=len(json_files))
+    else:
+        pbar = NoOp()
+
+    for i, json_file in enumerate(json_files):
+        batch = {}
+        input_ids = bert_tokenize(tokenizer, json_file['text'])
+        #print(input_ids)
+        position_ids = range(len(input_ids))
+        if json_file['id'] < 10000:
+            id = '0' + str(json_file['id'])
+        else:
+            id = json_file['id']
+        img_npz = np.load('/root/output_meme_butd/nlvr2_{}.npz'.format(id))
+        
+
+        img_feat = img_npz['features']
+        img_pos_feat = np.concatenate((img_npz['norm_bb'], img_npz['conf']), axis=1)
+        attn_masks = [1] * (len(input_ids)  + len(img_feat))
+        gather_index = range(len(input_ids)  + len(img_feat))
+
+        batch['input_ids'] = torch.tensor([input_ids])
+        batch['position_ids'] = torch.tensor([position_ids])
+        batch['img_feat'] = torch.tensor([img_feat], dtype=torch.float)
+        batch['img_pos_feat'] = torch.tensor([img_pos_feat], dtype=torch.float)
+        batch['attn_masks'] = torch.tensor([attn_masks])
+        batch['gather_index'] = torch.tensor([gather_index])
+        
+        
+
+
+        #print('input_ids ', batch['input_ids'].size())
+        #print('position_ids ', batch['position_ids'].size())
+        #print('img_feat ', batch['img_feat'].size())
+        #print('img_pos_feat ', batch['img_pos_feat'].size())
+        #print('attn_masks ', batch['attn_masks'].size())
+        #print('gather_index ', batch['gather_index'].size())
+        #print()
+        #print()
+        #print()
+
+        _, feature = model(batch, compute_loss=False)
+        print(feature.cpu().numpy().shape)
+        pbar.update(1)
+
+    model.train()
+    pbar.close()
+    
     tot_time = time()-st
     LOGGER.info(f"evaluation finished in {int(tot_time)} seconds, ")
     return eval_log, results
@@ -162,3 +191,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(args)
+

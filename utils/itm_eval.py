@@ -103,6 +103,18 @@ def inference(model, eval_loader):
     for i, mini_batches in enumerate(eval_loader):
         j = 0
         for batch in mini_batches:
+            print('input_ids ', batch['input_ids'])
+            print('position_ids ', batch['position_ids']size())
+            print('img_pos_feat ', batch['img_pos_feat'])
+            print('attn_masks ', batch['attn_masks'])
+            print('gather_index ', batch['gather_index'])
+            print()
+            print()
+            print()
+
+
+
+
             scores = model(batch, compute_loss=False)
             bs = scores.size(0)
             score_matrix.data[i, j:j+bs] = scores.data.squeeze(1).half()
