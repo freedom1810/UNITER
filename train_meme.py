@@ -28,11 +28,45 @@ from utils.const import IMG_DIM
 from utils.itm_eval import inference, itm_eval
 
 
-from pytorch_pretrained_bert import BertTokenizer
+
 import torch
 from horovod import torch as hvd
 from tqdm import tqdm
+
+from pytorch_pretrained_bert import BertTokenizer
 import numpy as np
+
+import argparse
+import os
+from os.path import exists, join
+from time import time
+
+import torch
+from torch.nn.utils import clip_grad_norm_
+from torch.utils.data import DataLoader, ConcatDataset
+from apex import amp
+from horovod import torch as hvd
+from tqdm import tqdm
+
+from data import (PrefetchLoader, TxtTokLmdb, ImageLmdbGroup,
+                  ItmRankDataset, itm_rank_collate,
+                  ItmValDataset, itm_val_collate,
+                  ItmEvalDataset, itm_eval_collate)
+from model.itm import UniterForImageTextRetrieval
+from optim import get_lr_sched
+from optim.misc import build_optimizer
+
+from utils.logger import LOGGER, TB_LOGGER, RunningMeter, add_log_to_file
+from utils.distributed import (all_reduce_and_rescale_tensors, all_gather_list,
+                               broadcast_tensors)
+from utils.save import ModelSaver, save_training_meta
+from utils.misc import NoOp, parse_with_config, set_dropout, set_random_seed
+from utils.const import IMG_DIM
+from utils.itm_eval import evaluate
+
+
+from data.MemeDataset import MemeAIDataset
+
 
 def main(opts):
     hvd.init()
@@ -51,13 +85,47 @@ def main(opts):
         opts.max_bb = train_opts.max_bb
         opts.min_bb = train_opts.min_bb
         opts.num_bb = train_opts.num_bb
+        
+    
     # Prepare model
     checkpoint = torch.load(opts.checkpoint)
     model = UniterForImageTextRetrieval.from_pretrained(
         opts.model_config, checkpoint, img_dim=IMG_DIM)
     if 'rank_output' not in checkpoint:
         model.init_output()  # zero shot setting
+
+
+    save_training_meta(opts)
+    pbar = tqdm(total=opts.num_train_steps)
+
+    model_saver = ModelSaver(join(opts.output_dir, 'ckpt'))
+    add_log_to_file(join(opts.output_dir, 'log', 'log.txt'))
+    # store ITM predictions
+    os.makedirs(join(opts.output_dir, 'results_val'))
+    os.makedirs(join(opts.output_dir, 'results_test'))
+    os.makedirs(join(opts.output_dir, 'results_train'))
+
+
+
+
+    model.to(device)
+    model = amp.initialize(model, enabled=opts.fp16, opt_level='O2')
+
+
     # load DBs and image dirs
+
+    #create train_loader
+
+    train_dataset = MemeAIDataset(json_path = '',
+                                    npz_folder = '', 
+                                    mode = 'train')
+
+    #create dev loader
+    val_dataset = MemeAIDataset(json_path = '',
+                                    npz_folder = '', 
+                                    mode = 'val')
+
+
     # npz_path = os.listdir('/root/output_meme_butd')
     # npz_path = ['/root/output_meme_butd/' + i for i in npz_path]
     json_files =open("/root/meme/train.json", "r")
@@ -71,7 +139,9 @@ def main(opts):
 @torch.no_grad()
 def evaluate(model, json_files):
 
-    
+    outfile = open('meme/train_feature.json','wb')
+
+    res = []
 
     def bert_tokenize(tokenizer, text):
         ids = []
@@ -97,17 +167,21 @@ def evaluate(model, json_files):
         pbar = NoOp()
 
     for i, json_file in enumerate(json_files):
+        
+        if i == 10:break
+
+        res_json ={'id': json_file['id']}
+
         batch = {}
         input_ids = bert_tokenize(tokenizer, json_file['text'])
-        #print(input_ids)
+        # print(input_ids)
         position_ids = range(len(input_ids))
+        
         if json_file['id'] < 10000:
             id = '0' + str(json_file['id'])
         else:
             id = json_file['id']
         img_npz = np.load('/root/output_meme_butd/nlvr2_{}.npz'.format(id))
-        
-
         img_feat = img_npz['features']
         img_pos_feat = np.concatenate((img_npz['norm_bb'], img_npz['conf']), axis=1)
         attn_masks = [1] * (len(input_ids)  + len(img_feat))
@@ -121,28 +195,35 @@ def evaluate(model, json_files):
         batch['gather_index'] = torch.tensor([gather_index])
         
         
-
-
-        #print('input_ids ', batch['input_ids'].size())
-        #print('position_ids ', batch['position_ids'].size())
-        #print('img_feat ', batch['img_feat'].size())
-        #print('img_pos_feat ', batch['img_pos_feat'].size())
-        #print('attn_masks ', batch['attn_masks'].size())
-        #print('gather_index ', batch['gather_index'].size())
-        #print()
-        #print()
-        #print()
+        # print('input_ids ', batch['input_ids'])
+        # print('position_ids ', batch['position_ids'])
+        # print('img_feat ', batch['img_feat'])
+        # print('img_pos_feat ', batch['img_pos_feat'])
+        # print('attn_masks ', batch['attn_masks'])
+        # print('gather_index ', batch['gather_index'])
+        # print()
+        # print()
+        # print()
 
         _, feature = model(batch, compute_loss=False)
-        print(feature.cpu().numpy().shape)
+        res_json['feature'] = feature.cpu().numpy()[0]
+        res.append(res_json)
+
         pbar.update(1)
 
     model.train()
     pbar.close()
+
+
+    pickle.dump(res,outfile)
+    outfile.close()
     
+
+    
+
     tot_time = time()-st
     LOGGER.info(f"evaluation finished in {int(tot_time)} seconds, ")
-    return eval_log, results
+    # return eval_log, results
 
 
 if __name__ == "__main__":
@@ -191,4 +272,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(args)
-

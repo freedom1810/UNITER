@@ -63,8 +63,8 @@ def main(opts):
     if 'rank_output' not in checkpoint:
         model.init_output()  # zero shot setting
 
-    model.to(device)
-    model = amp.initialize(model, enabled=opts.fp16, opt_level='O2')
+    # model.to(device)
+    # model = amp.initialize(model, enabled=opts.fp16, opt_level='O2')
 
 
     # load DBs and image dirs
