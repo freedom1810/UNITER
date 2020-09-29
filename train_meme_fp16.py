@@ -35,11 +35,26 @@ from utils.itm_eval import evaluate
 
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, accuracy_score
+from data.MemeDataset import MemeAIDataset
+import numpy as np
 
+def collate_fn(inputs):
+    res = {}
+    res['input_ids'] = torch.cat([s[0]['input_ids'] for s in inputs], 0)
+    res['position_ids'] = torch.cat([s[0]['position_ids'] for s in inputs], 0)
+    res['img_feat'] = torch.cat([s[0]['img_feat'] for s in inputs], 0)
+    res['img_pos_feat'] = torch.cat([s[0]['img_pos_feat'] for s in inputs], 0)
+    res['attn_masks'] = torch.cat([s[0]['attn_masks'] for s in inputs], 0)
+    res['gather_index'] = torch.cat([s[0]['gather_index'] for s in inputs], 0)
 
+    y = torch.cat([torch.tensor([s[1]]) for s in inputs], 0)
+
+    return res, y
+    # assert len(inputs) == 1, "input batch size > 1"
+    # return inputs
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="1"  # specify which GPU(s) to be used
+# os.environ["CUDA_VISIBLE_DEVICES"]="1"  # specify which GPU(s) to be used
 
 def build_dataloader(dataset, collate_fn, is_train, opts):
     batch_size = opts.train_batch_size if is_train else 1
@@ -59,10 +74,12 @@ def main(opts):
     torch.cuda.set_device(hvd.local_rank())
     rank = hvd.rank()
     opts.rank = rank
+
+    
     LOGGER.info("device: {} n_gpu: {}, rank: {}, "
                 "16-bits training: {}".format(
                     device, n_gpu, hvd.rank(), opts.fp16))
-
+    device = torch.device("cuda:1")
     if opts.gradient_accumulation_steps < 1:
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, "
                          "should be >= 1".format(
@@ -71,8 +88,10 @@ def main(opts):
     set_random_seed(opts.seed)
 
     if hvd.rank() == 0:
-        save_training_meta(opts)
         TB_LOGGER.create(join(opts.output_dir, 'log'))
+        os.makedirs(join(opts.output_dir, 'ckpt'))
+        save_training_meta(opts)
+        # TB_LOGGER.create(join(opts.output_dir, 'log'))
         model_saver = ModelSaver(join(opts.output_dir, 'ckpt'))
         add_log_to_file(join(opts.output_dir, 'log', 'log.txt'))
         # store ITM predictions
@@ -83,33 +102,30 @@ def main(opts):
         LOGGER.disabled = True
         model_saver = NoOp()
 
-    # train_examples = None
-    LOGGER.info(f"Loading Train Dataset {opts.train_txt_dbs}, "
-                f"{opts.train_img_dbs}")
-    # check multiple DBs
-    assert len(opts.train_txt_dbs) == len(opts.train_img_dbs), \
-        "train txt_db and img_db have different length"
-
     # load DBs and image dirs
     all_img_dbs = ImageLmdbGroup(opts.conf_th, opts.max_bb, opts.min_bb,
                                  opts.num_bb, opts.compressed_db)
     # train
-    train_dataset = MemeAIDataset(json_path = '',
-                                    npz_folder = '', 
+    train_dataset = MemeAIDataset(json_path = '/home/data/meme_json/train.json',
+                                    npz_folder = '/home/data/faster_cnn_feature/', 
                                     mode = 'train')
     train_loader =  DataLoader(train_dataset, 
                                     batch_size = opts.train_batch_size, 
                                     shuffle = True, 
-                                    num_workers = opts.n_workers)
+                                    num_workers = opts.n_workers,
+                                    collate_fn=collate_fn)
+    train_loader = PrefetchLoader(train_loader)
 
     # val
-    val_dataset = MemeAIDataset(json_path = '',
-                                    npz_folder = '', 
+    val_dataset = MemeAIDataset(json_path = '/home/data/meme_json/dev.json',
+                                    npz_folder = '/home/data/faster_cnn_feature/', 
                                     mode = 'val')
     val_loader =  DataLoader(val_dataset, 
-                                    batch_size = opts.train_batch_size, 
+                                    batch_size = opts.inf_minibatch_size, 
                                     shuffle = False, 
-                                    num_workers = opts.n_workers)
+                                    num_workers = opts.n_workers,
+                                    collate_fn=collate_fn)
+    val_loader = PrefetchLoader(val_loader)
 
     # Prepare model
     if opts.checkpoint:
@@ -124,8 +140,8 @@ def main(opts):
     model.to(device)
 
     # make sure every process has same model parameters in the beginning
-    broadcast_tensors([p.data for p in model.parameters()], 0)
-    set_dropout(model, opts.dropout)
+    # broadcast_tensors([p.data for p in model.parameters()], 0)
+    # set_dropout(model, opts.dropout)
 
     # Prepare optimizer
     optimizer = build_optimizer(model, opts)
@@ -133,8 +149,8 @@ def main(opts):
                                       enabled=opts.fp16, opt_level='O2')
 
     global_step = 0
-    LOGGER.info(f"***** Running training on {n_gpu} GPUs *****")
-    LOGGER.info("  Num examples = %d", len(train_dataset) * hvd.size())
+    # LOGGER.info(f"***** Running training on {n_gpu} GPUs *****")
+    # LOGGER.info("  Num examples = %d", len(train_dataset) * hvd.size())
     LOGGER.info("  Batch size = %d", opts.train_batch_size)
     LOGGER.info("  Accumulate steps = %d", opts.gradient_accumulation_steps)
     LOGGER.info("  Num steps = %d", opts.num_train_steps)
@@ -148,24 +164,32 @@ def main(opts):
     # quick hack for amp delay_unscale bug
     optimizer.zero_grad()
     optimizer.step()
-    while True:
-    for epoch in opts.epoch:
+    # while True:
+    for epoch in range(opts.epoch):
         print('epoch {}/ {}'.format(epoch, opts.epoch))
         pbar = tqdm(total=len(train_loader))
 
         model.train()
-        preds = []
-        gt = []
+        preds = None
+        gt = None
 
-        for step, x, y in enumerate(train_dataloader):
+        for step, batch in enumerate(train_loader):
+            x = batch[0]
+            y = batch[1]
             n_examples += x['input_ids'].size(0)
 
-            pred = model(x, compute_loss=False)
+            pred = model(x)
 
-            preds += list(pred.cpu().numpy())
-            gt += list(y)
+            if preds is None:
 
-            loss = F.binary_cross_entropy(pred, y)
+                preds = torch.sigmoid(pred)
+                gt = y
+            else:
+                preds = torch.cat((preds, torch.sigmoid(pred)), dim = 0)
+                gt = torch.cat((gt, y), dim = 0)
+
+
+            loss = F.binary_cross_entropy(torch.sigmoid(pred), y)
 
             delay_unscale = (step+1) % opts.gradient_accumulation_steps != 0
             with amp.scale_loss(loss, optimizer, delay_unscale=delay_unscale
@@ -202,17 +226,40 @@ def main(opts):
                     TB_LOGGER.add_scalar('grad_norm', grad_norm, global_step)
                 optimizer.step()
                 optimizer.zero_grad()
-            pbar.update(1)
 
 
-        roc = roc_auc_score(preds, gt)
-        acc = accuracy_score(preds, gt)
+        global_step += 1
+
+        # learning rate scheduling
+        lr_this_step = get_lr_sched(global_step, opts)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr_this_step
+        TB_LOGGER.add_scalar('lr', lr_this_step, global_step)
+
+        # log loss
+        # NOTE: not gathered across GPUs for efficiency
+        TB_LOGGER.add_scalar('loss', running_loss.val, global_step)
+        TB_LOGGER.step()
+
+        # update model params
+        if opts.grad_norm != -1:
+            grad_norm = clip_grad_norm_(amp.master_params(optimizer),
+                                        opts.grad_norm)
+            TB_LOGGER.add_scalar('grad_norm', grad_norm, global_step)
+        optimizer.step()
+        optimizer.zero_grad()
+
+        with torch.no_grad():
+            preds = preds.cpu().numpy().reshape(len(preds), )
+            gt = gt.cpu().numpy()
+            roc = roc_auc_score(gt, preds)
+            acc = accuracy_score(gt, np.around(preds)) 
         train_log = {'train/roc': roc, 'train/acc': acc}
         TB_LOGGER.log_scaler_dict({f"train/{k}": v for k, v in train_log.items()})
 
         # monitor training throughput
 
-        val_log = evaluate(model, val_loader)
+        val_log = validate(model, val_loader)
         TB_LOGGER.log_scaler_dict({f"valid/{k}": v for k, v in val_log.items()})
 
         LOGGER.info(train_log)
@@ -225,27 +272,36 @@ def main(opts):
 
 @torch.no_grad()
 def validate(model, val_loader):
-    if hvd.rank() == 0:
-        pbar = tqdm(total=len(val_loader))
-    else:
-        pbar = NoOp()
+    # if hvd.rank() == 0:
+    pbar = tqdm(total=len(val_loader))
+    # else:
+    #     pbar = NoOp()
 
     LOGGER.info("start running Image Retrieval validation ...")
     model.eval()
     n_ex = 0
     st = time()
-    preds = []
-    gt = []
+    preds = None
+    gt = None
+
     for x, y in val_loader:
 
-        pred = model(x, compute_loss=False)
-        preds += list(pred.cpu().numpy())
-        gt += list(y)
+        pred = model(x)
+        if preds is None:
+
+            preds = torch.sigmoid(pred)
+            gt = y
+        else:
+            preds = torch.cat((preds, torch.sigmoid(pred)), dim = 0)
+            gt = torch.cat((gt, y), dim = 0)
 
         pbar.update(1)
 
-    roc = roc_auc_score(preds, gt)
-    acc = accuracy_score(preds, gt)
+
+    preds = preds.cpu().numpy().reshape(len(preds), )
+    gt = gt.cpu().numpy()
+    roc = roc_auc_score(gt, preds)
+    acc = accuracy_score(gt, np.around(preds)) 
     val_log = {'valid/roc': roc,
                'valid/acc': acc}
 
@@ -335,6 +391,7 @@ if __name__ == "__main__":
 
     # can use config files
     parser.add_argument('--config', help='JSON config files')
+    parser.add_argument('--model_config')
 
     args = parse_with_config(parser)
 

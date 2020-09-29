@@ -15,8 +15,8 @@ from utils.logger import LOGGER
 
 
 def save_training_meta(args):
-    if args.rank > 0:
-        return
+    # if args.rank > 0:
+    #     return
 
     if not exists(args.output_dir):
         os.makedirs(join(args.output_dir, 'log'))
@@ -24,6 +24,7 @@ def save_training_meta(args):
 
     with open(join(args.output_dir, 'log', 'hps.json'), 'w') as writer:
         json.dump(vars(args), writer, indent=4)
+        
     model_config = json.load(open(args.model_config))
     with open(join(args.output_dir, 'log', 'model.json'), 'w') as writer:
         json.dump(model_config, writer, indent=4)

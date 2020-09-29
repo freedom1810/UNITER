@@ -2,11 +2,11 @@ python prepro.py --annotation ~/test1.json --output output_bert_nlvr2
 wget https://convaisharables.blob.core.windows.net/uniter/txt_db/itm_coco_val.db.tar -P $DOWNLOAD/txt_db/
 wget https://convaisharables.blob.core.windows.net/uniter/pretrained/uniter-base.pt -P $DOWNLOAD/pretrained/
 
-python inf_itm.py  --checkpoint /root/UNITER/checkpoint/uniter-base.pt --model_config /src/config/uniter-base.json 
+python inf_meme.py  --checkpoint /home/data/uniter_pretrained/uniter-base.pt --model_config config/uniter-base.json 
 
 
-python inf_itm.py --txt_db /root/itm_coco_val.db --img_db /root/coco_val2014 \
---checkpoint /root/UNITER/checkpoint/uniter-base.pt --model_config config/uniter-base.json\
+python inf_meme.py --txt_db /root/itm_coco_val.db --img_db /root/coco_val2014 \
+--checkpoint /root/UNITER/checkpoint/uniter-base.pt --model_config config/uniter-base.json \
 --output_dir output_uniter_1 --fp16 --n_workers 0 --batch_size 1
 
 dict_keys(['input_ids', 'position_ids', 'img_feat', 'img_pos_feat', 'attn_masks', 'gather_index'])
@@ -17,3 +17,8 @@ torch.Size([400, 37, 2048])
 torch.Size([400, 37, 7])
 torch.Size([400, 53])
 torch.Size([400, 53])
+
+
+python train_meme4.py --checkpoint /home/data/uniter_pretrained/uniter-base.pt --output_dir meme_train \
+--model_config config/uniter-base.json \
+--train_batch_size 1 --inf_minibatch_size 1 --epoch 50 --optim adam --fp16 --n_workers 8 
