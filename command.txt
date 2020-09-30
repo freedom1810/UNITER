@@ -21,4 +21,4 @@ torch.Size([400, 53])
 
 python train_meme4.py --checkpoint /home/data/uniter_pretrained/uniter-base.pt --output_dir meme_train \
 --model_config config/uniter-base.json \
---train_batch_size 1 --inf_minibatch_size 1 --epoch 50 --optim adam --fp16 --n_workers 8 
+--train_batch_size 1 --inf_minibatch_size 1 --epoch 50 --n_workers 8 

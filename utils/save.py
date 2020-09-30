@@ -56,7 +56,7 @@ def save_training_meta(args):
 
 
 class ModelSaver(object):
-    def __init__(self, output_dir, prefix='model_step', suffix='pt'):
+    def __init__(self, output_dir, prefix='model_epoch', suffix='pt'):
         self.output_dir = output_dir
         self.prefix = prefix
         self.suffix = suffix
@@ -71,4 +71,5 @@ class ModelSaver(object):
             dump = {'step': step, 'optimizer': optimizer.state_dict()}
             if hasattr(optimizer, '_amp_stash'):
                 pass  # TODO fp16 optimizer
-            torch.save(dump, f'{self.output_dir}/train_state_{step}.pt')
+            # torch.save(dump, f'{self.output_dir}/train_state_{step}.pt')
+            torch.save(dump, f'{self.output_dir}/step_{step}.pt')

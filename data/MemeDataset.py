@@ -128,7 +128,7 @@ class MemeAIDataset(Dataset):
 
         images = []
         labels = []
-        for json_file in tqdm(json_files):
+        for json_file in tqdm(json_files[:150]):
 
             batch = {}
             input_ids = bert_tokenize(tokenizer, json_file['text'])
